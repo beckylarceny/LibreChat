@@ -1,6 +1,7 @@
 import { memo, useRef, useMemo, useEffect, useCallback, useContext, Fragment } from 'react';
 import { useStore } from 'jotai';
 import { Constants, ContentTypes, Tools } from 'librechat-data-provider';
+import { hasParallelLanes, parallelLaneGroups, hasPendingApprovalInPart } from '@librechat/chat';
 import {
   ReasoningDisclosureContext,
   reasoningDisclosure,
@@ -45,12 +46,10 @@ import { ParallelContentRenderer, type PartWithIndex } from './ParallelContent';
 import { isPreviewedToolCallPart, PreviewedToolCallPart } from './hydration';
 import { MediaContext, MessageContext, SearchContext } from '~/Providers';
 import MemoryArtifacts, { hasMemoryArtifacts } from './MemoryArtifacts';
-import { hasParallelLanes, parallelLaneGroups } from '~/utils/lanes';
 import { useMCPAppsPolicy } from '~/Providers/MCPAppsPolicyContext';
 import { selectToolCallUIResources } from '~/utils/mcpApps';
 import PendingSkillCall from './Parts/PendingSkillCall';
 import ActivityPhaseGroup from './ActivityPhaseGroup';
-import { hasPendingApprovalInPart } from '~/utils';
 import EditContentParts from './EditContentParts';
 import { EmptyText, AgentUpdate } from './Parts';
 import ApprovalProvider from './ApprovalContext';

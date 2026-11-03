@@ -1,6 +1,14 @@
 import { useRef, createContext, useContext } from 'react';
-import type { TMessage, TForkConvoRequest } from 'librechat-data-provider';
-import type { MouseEvent, ReactNode, RefObject } from 'react';
+import type {
+  Agent,
+  TFile,
+  TMessage,
+  Assistant,
+  TConversation,
+  SearchResultData,
+  TForkConvoRequest,
+} from 'librechat-data-provider';
+import type { Dispatch, ReactNode, MouseEvent, RefObject, SetStateAction } from 'react';
 
 /** The scroll machinery of the message list, as the app's scrolling hook drives it. */
 export type MessagesScrolling = {
@@ -18,6 +26,26 @@ export type MessagesScrolling = {
   debouncedHandleScroll: () => void;
   /** Reports whether the end marker is in view. */
   handleNearBottomChange: (isNearBottom: boolean) => void;
+};
+
+/** What the message slot renders one visible row of the thread from. */
+export type MessageRowSlotProps = {
+  message: TMessage;
+  /** Position of the message among its siblings, oldest first. */
+  siblingIdx: number;
+  siblingCount: number;
+  /** Shows the sibling at the given position, oldest first. */
+  setSiblingIdx: (value: number) => void;
+  currentEditId: string | number | null;
+  setCurrentEditId: Dispatch<SetStateAction<string | number | null>>;
+};
+
+/** What the activity slot renders the background activity of a row from. */
+export type ActivitySlotProps = {
+  conversationId: string;
+  /** The messages whose activity the group shows, in order. */
+  parentMessageIds: string[];
+  hasParallelContent: boolean;
 };
 
 /** Reports, from the end marker's visibility, that the reader has seen the conversation. */
@@ -45,6 +73,60 @@ export type ForkEvents = {
 /** Starts a fork of a conversation. */
 export type ForkConversation = (request: TForkConvoRequest, events: ForkEvents) => void;
 
+/** The renderer a message is displayed with: `full` for model text, `lite` for user markdown. */
+export type MarkdownVariant = 'full' | 'lite';
+
+/** What a row asks the host to copy. */
+export type MessageCopyInput = {
+  message: TMessage;
+  /** Search results the message cites, resolved into the copied text. */
+  searchResults?: { [key: string]: SearchResultData };
+  /** The renderer the row displayed the message with, when it is not the authorship default. */
+  variant?: MarkdownVariant;
+};
+
+/** A row's copy action: `copyToClipboard` flips `setIsCopied` on while the copied state shows. */
+export type MessageCopy = {
+  copyToClipboard: (setIsCopied: Dispatch<SetStateAction<boolean>>) => void;
+  canCopy: boolean;
+};
+
+/** What a message author's icon is drawn from: the endpoint and model, or the agent or
+ *  assistant that wrote it. */
+export type MessageIconData = { endpoint?: string | null; isCreatedByUser?: boolean } & Pick<
+  TConversation,
+  'modelLabel'
+> &
+  Pick<TMessage, 'model' | 'iconURL'>;
+
+/** The props the app's message icon renders from. */
+export type MessageIconProps = {
+  iconData?: MessageIconData;
+  assistant?: Assistant;
+  agent?: Agent;
+};
+
+/** The button a read-aloud control draws, through the row's toolbar styling. */
+export type MessageAudioButtonProps = {
+  onClick: (e?: MouseEvent<HTMLButtonElement>) => void;
+  title: string;
+  icon: ReactNode;
+  isActive?: boolean;
+  isVisible?: boolean;
+  isDisabled?: boolean;
+  className?: string;
+};
+
+/** What a row hands the app's read-aloud control: the text to speak and how to draw its button. */
+export type MessageAudioProps = {
+  isLast?: boolean;
+  index: number;
+  messageId: string;
+  content: string;
+  className?: string;
+  renderButton?: (props: MessageAudioButtonProps) => ReactNode;
+};
+
 /**
  * Everything the message list reads from the app: viewer preferences, and render slots for the
  * pieces of a row that have not moved into this package yet. Members are hooks or slots, called
@@ -62,7 +144,14 @@ export interface MessagesHost {
   useForkPreferences: () => ForkPreferences;
   /** Forks a conversation and opens the copy; `null` where forking is unavailable. */
   useForkConversation: () => ForkConversation | null;
-
+  /** Copies a message the way the app renders it; `canCopy` is `false` where copying is unavailable. */
+  useMessageCopy: (input: MessageCopyInput) => MessageCopy;
+  /** Reads the visible thread at call time; returns `undefined` outside a messages view. */
+  useGetMessages: () => () => TMessage[] | undefined;
+  /** Whether a queued follow-up is about to start in this conversation, so no rerun races it. */
+  useHasPendingTurn: (conversationId: string) => boolean;
+  /** Renders the app's read-aloud control, or `null` while read-aloud is off. */
+  renderMessageAudio: (props: MessageAudioProps) => ReactNode;
   /**
    * Drives the list's scrolling: follows the stream, lands on a conversation's end and keeps
    * the reader's position.
@@ -83,9 +172,20 @@ export interface MessagesHost {
     measureNearBottom: () => boolean | null,
     isResponseRendered: (messageId: string) => boolean,
   ) => ReportNearBottom;
+
+  /** Renders a message author's icon with the app's endpoint and avatar icons. */
+  renderMessageIcon: (props: MessageIconProps) => ReactNode;
+  /** Renders one message of the thread: its header, body and controls. */
+  renderMessageRow: (props: MessageRowSlotProps) => ReactNode;
+  /** Renders the background activity (subagent runs) launched from a row. */
+  renderActivity: (props: ActivitySlotProps) => ReactNode;
+  /** The conversation's files by id, which hydrate the files of a thread row. */
+  useFileMap: () => Record<string, TFile> | undefined;
 }
 
 const noop = (): void => undefined;
+
+const fallbackMessageCopy: MessageCopy = { copyToClipboard: noop, canCopy: false };
 
 const fallbackForkPreferences: ForkPreferences = {
   option: '',
@@ -113,17 +213,27 @@ function useInertScrolling(): MessagesScrolling {
 
 const ignoreNearBottom: ReportNearBottom = () => undefined;
 
-/** The host rows read outside any provider before an app registers one: locale clock, no slots, no forking. */
+const noMessages = (): TMessage[] | undefined => undefined;
+
+/** The host rows read outside any provider before an app registers one: locale clock, no slots,
+ *  no forking, no copying, no thread, no queued turn, no read-aloud, inert scrolling. */
 const fallbackHost: MessagesHost = {
   useHour12: () => undefined,
   renderFiles: () => null,
   useForkPreferences: () => fallbackForkPreferences,
   useForkConversation: () => null,
-
+  useMessageCopy: () => fallbackMessageCopy,
+  useGetMessages: () => noMessages,
+  useHasPendingTurn: () => false,
+  renderMessageAudio: () => null,
   useScrolling: useInertScrolling,
   useScreenshotTarget: () => useRef<HTMLDivElement>(null),
   useAutoScroll: () => false,
   useConversationSeen: () => ignoreNearBottom,
+  renderMessageIcon: () => null,
+  renderMessageRow: () => null,
+  renderActivity: () => null,
+  useFileMap: () => undefined,
 };
 
 const MessagesHostContext = createContext<MessagesHost | null>(null);
@@ -152,4 +262,14 @@ export function MessagesHostProvider({
 /** The host of the nearest provider, else the registered default, else the fallback. */
 export function useMessagesHost(): MessagesHost {
   return useContext(MessagesHostContext) ?? defaultHost;
+}
+
+/** A message author's icon, drawn by the host's slot. */
+export function MessageIconSlot(props: MessageIconProps): ReactNode {
+  return useMessagesHost().renderMessageIcon(props);
+}
+
+/** A row's read-aloud control, drawn by the host's slot. */
+export function MessageAudioSlot(props: MessageAudioProps): ReactNode {
+  return useMessagesHost().renderMessageAudio(props);
 }
